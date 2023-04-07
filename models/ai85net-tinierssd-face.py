@@ -63,7 +63,6 @@ class TinySSDBaseFace(nn.Module):
 
         fire4_feats = self.fire4(out)  # (N, 64, 56, 42)
 
-
         out = self.fire5(fire4_feats)  # (N, 64, 56, 42)
 
         out = self.fire6(out)  # (N, 64, 56, 42)
@@ -72,12 +71,9 @@ class TinySSDBaseFace(nn.Module):
 
         fire8_feats = self.fire8(out)  # (N, 32, 56, 42)
 
-
         fire9_feats = self.fire9(fire8_feats)  # (N, 32, 28, 21)
 
-
         fire10_feats = self.fire10(fire9_feats)  # (N, 32, 14, 10)
-
 
         return fire4_feats, fire8_feats, fire9_feats, fire10_feats
 
@@ -119,7 +115,6 @@ class AuxiliaryConvolutions(nn.Module):
 
         conv12_2_feats = self.conv12_2(out)
 
-
         return conv12_2_feats
 
 
@@ -146,7 +141,7 @@ class PredictionConvolutions(nn.Module):
         self.n_classes = n_classes
 
         n_boxes = {'fire9': 2,
-                'conv12_2': 2}
+                   'conv12_2': 2}
 
         # 4 prior-boxes implies we use 4 different aspect ratios, etc.
 
@@ -182,23 +177,17 @@ class PredictionConvolutions(nn.Module):
         """
         batch_size = fire4_feats.size(0)
 
-
-
         l_fire9 = self.loc_fire9(fire9_feats)
         l_fire9 = l_fire9.permute(0, 2, 3, 1).contiguous()
         l_fire9 = l_fire9.view(batch_size, -1, 4)
-
-
 
         l_conv12_2 = self.loc_conv12_2(conv12_2_feats)
         l_conv12_2 = l_conv12_2.permute(0, 2, 3, 1).contiguous()
         l_conv12_2 = l_conv12_2.view(batch_size, -1, 4)
 
-
         c_fire9 = self.cl_fire9(fire9_feats)
         c_fire9 = c_fire9.permute(0, 2, 3, 1).contiguous()
         c_fire9 = c_fire9.view(batch_size, -1, self.n_classes)
-
 
         c_conv12_2 = self.cl_conv12_2(conv12_2_feats)
         c_conv12_2 = c_conv12_2.permute(0, 2, 3, 1).contiguous()
@@ -206,7 +195,7 @@ class PredictionConvolutions(nn.Module):
 
         # Concatenate in this specific order (i.e. must match the order of the prior-boxes)
         locs = torch.cat([l_fire9,  l_conv12_2], dim=1)
-        classes_scores = torch.cat([ c_fire9,  c_conv12_2],
+        classes_scores = torch.cat([c_fire9,  c_conv12_2],
                                    dim=1)
         return (locs, classes_scores)
 
@@ -266,8 +255,8 @@ class TinierSSDFace(nn.Module):
         :return: prior boxes in center-size coordinates
         """
 
-        fmap_dims = {'fire9': (28,21),
-                     'conv12_2': (7,5)}
+        fmap_dims = {'fire9': (28, 21),
+                     'conv12_2': (7, 5)}
 
         fmaps = list(fmap_dims.keys())
 
