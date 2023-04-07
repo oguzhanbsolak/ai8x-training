@@ -14,15 +14,16 @@ https://ieeexplore.ieee.org/abstract/document/8373813
 
 import errno
 import os
+import glob
+import pickle
+
 
 import torch
 from torch.utils.data import Dataset
 from torchvision import transforms
 from tqdm import tqdm
-import pickle
 from PIL import Image
-from facenet_pytorch import MTCNN, extract_face
-import glob
+from facenet_pytorch import MTCNN
 
 import ai8x
 
@@ -30,10 +31,10 @@ import ai8x
 class VGGFace2_FaceDetectionDataset(Dataset):
     """
     VGGFace2 Dataset for face detection
-    
+
     VGGFace2: A Dataset for Recognising Faces across Pose and Age
     https://ieeexplore.ieee.org/abstract/document/8373813
-    
+
     GT Format: 0-3:Box Coordinates
 
     """
@@ -41,7 +42,7 @@ class VGGFace2_FaceDetectionDataset(Dataset):
 
         if d_type not in ('test', 'train'):
             raise ValueError("d_type can only be set to 'test' or 'train'")
-        
+
         self.root_dir = root_dir
         self.d_type = d_type
         self.transform = transform
@@ -49,20 +50,21 @@ class VGGFace2_FaceDetectionDataset(Dataset):
         self.dataset_path = os.path.join(self.root_dir, "VGGFace-2")
         self.__makedir_exist_ok(self.dataset_path)
         self.__makedir_exist_ok(os.path.join(self.dataset_path, "processed"))
-        
 
-        if self.d_type == 'train' or self.d_type == 'test':
+
+        if self.d_type in ('train', 'test'):
             self.gt_path = os.path.join(self.dataset_path, "processed", self.d_type+"_gt.pickle")
             self.d_path = os.path.join(self.dataset_path, self.d_type)
             if not os.path.exists(self.gt_path):
-                assert os.path.isdir(self.d_path), (f'No dataset at {self.d_path}.\n'
-                                            ' Please review the term and conditions at https://www.robots.ox.ac.uk/~vgg/data/vgg_face2/ .\n'
-                                            ' Then, download the dataset and extract raw images to the train and test subfolders. \n'
-                                            ' Expected folder structure: \n'
-                                            ' - root_dir \n'
-                                            '     - VGGFace-2 \n'
-                                            '       - train \n'
-                                            '       - test \n')
+                assert os.path.isdir(self.d_path),
+                 (f'No dataset at {self.d_path}.\n'
+                    ' Please review the term and conditions at https://www.robots.ox.ac.uk/~vgg/data/vgg_face2/ .\n'
+                    ' Then, download the dataset and extract raw images to the train and test subfolders. \n'
+                    ' Expected folder structure: \n'
+                    ' - root_dir \n'
+                    '     - VGGFace-2 \n'
+                    '       - train \n'
+                    '       - test \n')
 
                 print("Extracting ground truth from the " + self.d_type + " set")
                 self.__extract_gt()
@@ -80,17 +82,17 @@ class VGGFace2_FaceDetectionDataset(Dataset):
         Extracts the ground truth from the dataset
         """
         mtcnn = MTCNN()
-        img_paths = [jpg for jpg in glob.glob(os.path.join(self.d_path+"/**/", "*.jpg"), recursive =True)]
+        img_paths = list(glob.glob(os.path.join(self.d_path + '/**/', '*.jpg'), recursive=True))
         nf_number = 0
         pickle_dict = {key: [] for key in ["gt", "img_list"]}
 
-        for i, jpg in enumerate(tqdm(img_paths)):
+        for jpg in tqdm(img_paths):
             img = Image.open(jpg)
             img = img.resize((self.img_size[1], self.img_size[0]))
 
-            try: 
+            try:
                 gt, _ = mtcnn.detect(img, landmarks=False)
-            except:
+            except Exception as e:
                 nf_number += 1
                 continue
 
@@ -100,13 +102,13 @@ class VGGFace2_FaceDetectionDataset(Dataset):
 
             pickle_dict["gt"].append(gt)
             pickle_dict["img_list"].append(os.path.relpath(jpg, self.dataset_path))
-           
+
         if nf_number > 0:
-            print("Not found any faces in %d images" % (nf_number))
+            print(f'Not found any faces in {nf_number} images ')
 
         with open(self.gt_path, 'wb') as f:
             pickle.dump(pickle_dict, f)
-        
+
     def __len__(self):
         return len(self.pickle_dict["img_list"]) - 1
 
@@ -116,9 +118,9 @@ class VGGFace2_FaceDetectionDataset(Dataset):
 
         if torch.is_tensor(index):
             index = index.tolist()
-            
+
         img = Image.open(os.path.join(self.dataset_path, self.pickle_dict["img_list"][index]))
-        
+
         ground_truth = self.pickle_dict["gt"][index]
 
         lbls = [1] * ground_truth.shape[0]
@@ -131,13 +133,13 @@ class VGGFace2_FaceDetectionDataset(Dataset):
                 box[3] = box[3] / self.img_size[0]
 
             boxes = torch.as_tensor(ground_truth, dtype=torch.float32)
-            boxes = boxes.clamp_(min=0, max=1)          
+            boxes = boxes.clamp_(min=0, max=1)
 
             labels = torch.as_tensor(lbls, dtype=torch.int64)
 
         return img, (boxes, labels)
 
-    
+
     @staticmethod
     def collate_fn(batch):
         """
@@ -168,10 +170,9 @@ class VGGFace2_FaceDetectionDataset(Dataset):
                 pass
             else:
                 raise
-    
 
 
-def VGGFace2_Facedetection_get_datasets(data, load_train=True, load_test=True, img_size=(224, 168)):
+def VGGFace2_Facedetection_get_datasets(data, load_train=True, load_test=True, img_size=(224,168)):
 
     """ Returns FaceDetection Dataset
     """
