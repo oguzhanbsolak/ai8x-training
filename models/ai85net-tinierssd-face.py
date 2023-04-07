@@ -91,8 +91,10 @@ class AuxiliaryConvolutions(nn.Module):
         super().__init__()
 
         # Auxiliary/additional convolutions on top of the VGG base
-        self.conv12_1 = ai8x.FusedConv2dBNReLU(32, 16, 3, padding=1, **kwargs)  # (N, 16, 14, 10)
-        self.conv12_2 = ai8x.FusedMaxPoolConv2dBNReLU(16, 16, 3, padding=1,  **kwargs)  # (N, 16, 7, 5)
+        # (N, 16, 14, 10)
+        self.conv12_1 = ai8x.FusedConv2dBNReLU(32, 16, 3, padding=1, **kwargs)
+        # (N, 16, 7, 5)
+        self.conv12_2 = ai8x.FusedMaxPoolConv2dBNReLU(16, 16, 3, padding=1,  **kwargs)
 
         self.init_conv2d()
 
@@ -147,17 +149,17 @@ class PredictionConvolutions(nn.Module):
                 'conv12_2': 2}
 
         # 4 prior-boxes implies we use 4 different aspect ratios, etc.
-        
-        self.loc_fire9 = ai8x.FusedConv2dBN(32, n_boxes['fire9'] * 4, kernel_size=3, padding=1, 
+
+        self.loc_fire9 = ai8x.FusedConv2dBN(32, n_boxes['fire9'] * 4, kernel_size=3, padding=1,
                                             **kwargs)
-        
-        self.loc_conv12_2 = ai8x.FusedConv2dBN(16, n_boxes['conv12_2'] * 4, kernel_size=3, 
+
+        self.loc_conv12_2 = ai8x.FusedConv2dBN(16, n_boxes['conv12_2'] * 4, kernel_size=3,
                                                padding=1, **kwargs)
 
-        # Class prediction convolutions (predict classes in localization boxes)        
-        self.cl_fire9 = ai8x.FusedConv2dBN(32, n_boxes['fire9'] * n_classes, kernel_size=3, 
+        # Class prediction convolutions (predict classes in localization boxes)
+        self.cl_fire9 = ai8x.FusedConv2dBN(32, n_boxes['fire9'] * n_classes, kernel_size=3,
                                            padding=1, **kwargs)
-        
+
         self.cl_conv12_2 = ai8x.FusedConv2dBN(16, n_boxes['conv12_2'] * n_classes, kernel_size=3,
                                               padding=1, **kwargs)
 
@@ -180,13 +182,13 @@ class PredictionConvolutions(nn.Module):
         """
         batch_size = fire4_feats.size(0)
 
-        
+
 
         l_fire9 = self.loc_fire9(fire9_feats)
         l_fire9 = l_fire9.permute(0, 2, 3, 1).contiguous()
         l_fire9 = l_fire9.view(batch_size, -1, 4)
 
-        
+
 
         l_conv12_2 = self.loc_conv12_2(conv12_2_feats)
         l_conv12_2 = l_conv12_2.permute(0, 2, 3, 1).contiguous()
@@ -196,7 +198,7 @@ class PredictionConvolutions(nn.Module):
         c_fire9 = self.cl_fire9(fire9_feats)
         c_fire9 = c_fire9.permute(0, 2, 3, 1).contiguous()
         c_fire9 = c_fire9.view(batch_size, -1, self.n_classes)
-        
+
 
         c_conv12_2 = self.cl_conv12_2(conv12_2_feats)
         c_conv12_2 = c_conv12_2.permute(0, 2, 3, 1).contiguous()
@@ -246,7 +248,7 @@ class TinierSSDFace(nn.Module):
         :param image: images, a tensor of dimensions
         :return: Prior boxes' locations and class scores for each image
         """
-        fire4_feats, fire8_feats, fire9_feats, fire10_feats = self.base(image)
+        fire4_feats, _, fire9_feats, fire10_feats = self.base(image)
 
         # Run auxiliary convolutions (higher level feature map generators)
         conv12_2_feats = self.aux_convs(fire10_feats)
@@ -308,7 +310,7 @@ class TinierSSDFace(nn.Module):
                                 additional_scale = 1.
                             prior_boxes.append([cx, cy, additional_scale, additional_scale])
         prior_boxes = torch.FloatTensor(prior_boxes).to(device)  # (1246, 4)
-        prior_boxes.clamp_(0, 1)  
+        prior_boxes.clamp_(0, 1)
 
         return prior_boxes
 
