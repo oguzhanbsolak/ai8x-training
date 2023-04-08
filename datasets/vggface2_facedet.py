@@ -13,17 +13,17 @@ https://ieeexplore.ieee.org/abstract/document/8373813
 
 
 import errno
-import os
 import glob
+import os
 import pickle
-
-
 import torch
 from torch.utils.data import Dataset
 from torchvision import transforms
-from tqdm import tqdm
+
 from PIL import Image
 from facenet_pytorch import MTCNN
+from tqdm import tqdm
+
 
 import ai8x
 
@@ -57,7 +57,7 @@ class VGGFace2_FaceDetectionDataset(Dataset):
             self.d_path = os.path.join(self.dataset_path, self.d_type)
             if not os.path.exists(self.gt_path):
                 assert os.path.isdir(self.d_path), (f'No dataset at {self.d_path}.\n'
-                    ' Please review the term and conditions at \n' 
+                    ' Please review the term and conditions at \n'
                     ' https://www.robots.ox.ac.uk/~vgg/data/vgg_face2/ .\n'
                     ' Then, download the dataset and extract raw images \n'
                     ' to the train and test subfolders. \n'
@@ -91,11 +91,7 @@ class VGGFace2_FaceDetectionDataset(Dataset):
             img = Image.open(jpg)
             img = img.resize((self.img_size[1], self.img_size[0]))
 
-            try:
-                gt, _ = mtcnn.detect(img, landmarks=False)
-            except (Exception,):
-                nf_number += 1
-                continue
+            gt, _ = mtcnn.detect(img, landmarks=False)
 
             if gt is None or None in gt:
                 nf_number += 1

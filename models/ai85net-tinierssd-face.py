@@ -158,7 +158,6 @@ class PredictionConvolutions(nn.Module):
         self.cl_conv12_2 = ai8x.FusedConv2dBN(16, n_boxes['conv12_2'] * n_classes, kernel_size=3,
                                               padding=1, **kwargs)
 
-
         # Initialize convolutions' parameters
         self.init_conv2d()
 
