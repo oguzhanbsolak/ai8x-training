@@ -56,10 +56,11 @@ class VGGFace2_FaceDetectionDataset(Dataset):
             self.d_path = os.path.join(self.dataset_path, self.d_type)
             if not os.path.exists(self.gt_path):
                 assert os.path.isdir(self.d_path), (f'No dataset at {self.d_path}.\n'
-                                                    ' Please review the term and conditions at \n'
-                                                    ' https://www.robots.ox.ac.uk/~vgg/data/vgg_face2/ .\n'
-                                                    ' Then, download the dataset and extract raw images \n'
-                                                    ' to the train and test subfolders. \n'
+                                                    ' Please review the term and'
+                                                    ' conditions at https://www.robots.ox.ac.uk/'
+                                                    '~vgg/data/vgg_face2/ . Then, download the'
+                                                    ' dataset and extract raw images to the'
+                                                    ' train and test subfolders.\n'
                                                     ' Expected folder structure: \n'
                                                     ' - root_dir \n'
                                                     '     - VGGFace-2 \n'
