@@ -56,15 +56,15 @@ class VGGFace2_FaceDetectionDataset(Dataset):
             self.d_path = os.path.join(self.dataset_path, self.d_type)
             if not os.path.exists(self.gt_path):
                 assert os.path.isdir(self.d_path), (f'No dataset at {self.d_path}.\n'
-                                                     ' Please review the term and conditions at \n'
-                                                     ' https://www.robots.ox.ac.uk/~vgg/data/vgg_face2/ .\n'
-                                                     ' Then, download the dataset and extract raw images \n'
-                                                     ' to the train and test subfolders. \n'
-                                                     ' Expected folder structure: \n'
-                                                     ' - root_dir \n'
-                                                     '     - VGGFace-2 \n'
-                                                     '       - train \n'
-                                                     '       - test \n')
+                                                    ' Please review the term and conditions at \n'
+                                                    ' https://www.robots.ox.ac.uk/~vgg/data/vgg_face2/ .\n'
+                                                    ' Then, download the dataset and extract raw images \n'
+                                                    ' to the train and test subfolders. \n'
+                                                    ' Expected folder structure: \n'
+                                                    ' - root_dir \n'
+                                                    '     - VGGFace-2 \n'
+                                                    '       - train \n'
+                                                    '       - test \n')
 
                 print("Extracting ground truth from the " + self.d_type + " set")
                 self.__extract_gt()
@@ -166,6 +166,7 @@ class VGGFace2_FaceDetectionDataset(Dataset):
             else:
                 raise
 
+
 def VGGFace2_Facedet_get_datasets(data, load_train=True, load_test=True, img_size=(224, 168)):
 
     """ Returns FaceDetection Dataset
@@ -180,7 +181,7 @@ def VGGFace2_Facedet_get_datasets(data, load_train=True, load_test=True, img_siz
         ])
 
         train_dataset = VGGFace2_FaceDetectionDataset(root_dir=data_dir, d_type='train',
-                             transform=train_transform, img_size=img_size)
+                                                      transform=train_transform, img_size=img_size)
 
         print(f'Train dataset length: {len(train_dataset)}\n')
     else:
@@ -192,7 +193,7 @@ def VGGFace2_Facedet_get_datasets(data, load_train=True, load_test=True, img_siz
                                             ai8x.normalize(args=args)])
 
         test_dataset = VGGFace2_FaceDetectionDataset(root_dir=data_dir, d_type='test',
-                            transform=test_transform, img_size=img_size)
+                                                     transform=test_transform, img_size=img_size)
 
         print(f'Test dataset length: {len(test_dataset)}\n')
     else:
