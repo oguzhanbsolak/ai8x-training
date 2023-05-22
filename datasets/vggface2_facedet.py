@@ -23,9 +23,9 @@ from torchvision import transforms
 
 from PIL import Image
 from tqdm import tqdm
-from datasets.face_id.facenet_pytorch import MTCNN
 
 import ai8x
+from datasets.face_id.facenet_pytorch import MTCNN
 
 
 class VGGFace2_FaceDetectionDataset(Dataset):
