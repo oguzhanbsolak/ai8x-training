@@ -21,7 +21,7 @@ import torch
 from torch.utils.data import Dataset
 from torchvision import transforms
 
-from facenet_pytorch import MTCNN
+from datasets.face_id.facenet_pytorch import MTCNN
 from PIL import Image
 from tqdm import tqdm
 
