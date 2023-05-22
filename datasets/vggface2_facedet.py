@@ -25,7 +25,7 @@ from PIL import Image
 from tqdm import tqdm
 
 import ai8x
-from .face_id.facenet_pytorch import MTCNN
+from datasets.face_id.facenet_pytorch import MTCNN
 
 
 class VGGFace2_FaceDetectionDataset(Dataset):
