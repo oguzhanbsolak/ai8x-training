@@ -90,7 +90,7 @@ class VGGFace2_FaceDetectionDataset(Dataset):
         for jpg in tqdm(img_paths):
             img = Image.open(jpg)
             img = img.resize((self.img_size[1], self.img_size[0]))
-
+            # pylint: disable-next=unbalanced-tuple-unpacking
             gt, _ = mtcnn.detect(img, landmarks=False)
 
             if gt is None or None in gt:
