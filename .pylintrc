@@ -1,7 +1,7 @@
 [MESSAGES CONTROL]
 disable=invalid-name, consider-using-with
 [TYPECHECK]
-ignored-modules = numpy, matplotlib.cm, torch, distiller, datasets.face_id.facenet_pytorch
+ignored-modules = numpy, matplotlib.cm, torch, distiller, datasets.vggface2_facedet
 ignored-classes = ModelProto
 [FORMAT]
 max-line-length = 99
