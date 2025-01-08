@@ -89,6 +89,8 @@ import torch.utils.data
 from torch import nn
 from torch.backends import cudnn
 from torch.nn.parallel import DistributedDataParallel
+#import timedelta from datetime
+from datetime import timedelta
 
 # pylint: disable=wrong-import-order
 import distiller
@@ -226,7 +228,7 @@ def main():
                               'Please raise the limit (see documentation).', nfiles)
 
     # Set hardware device
-    ai8x.set_device(args.device, args.act_mode_8bit, args.avg_pool_rounding)
+    ai8x.set_device(args.device, args.act_mode_8bit, args.avg_pool_rounding, lsq_weight_scale=args.lsq_weight_scale)
 
     if args.epochs is None:
         args.epochs = 90
@@ -387,6 +389,7 @@ def main():
         try:
             model, compression_scheduler, optimizer, start_epoch = apputils.load_checkpoint(
                 model, args.resumed_checkpoint_path, model_device=args.device)
+            #optimizer.param_groups[0]['lr'] = 5e-4
         except ValueError as exc:
             raise ValueError('\n ERROR: Unable to resume from the checkpoint. '
                              'The reason might be the size mismatch between checkpoint and'
@@ -479,7 +482,7 @@ def main():
         )
 
     if local_rank >= 0:  # DistributedDataParallel
-        torch.distributed.init_process_group(backend='nccl' if args.device == 'cuda' else 'gloo')
+        torch.distributed.init_process_group(backend='nccl' if args.device == 'cuda' else 'gloo', timeout=timedelta(seconds=3600))
         model = DistributedDataParallel(
             torch.nn.SyncBatchNorm.convert_sync_batchnorm(model),
             device_ids=[local_rank] if args.device == 'cuda' else None,
@@ -603,7 +606,7 @@ def main():
         if qat_policy is not None and epoch > 0 and epoch == qat_policy['start_epoch']:
             msglogger.info('Initiating quantization aware training (QAT)...')
 
-            model, dynamo, ddp = model_wrapper.unwrap(model)
+            model, _, _ = model_wrapper.unwrap(model)
 
             # Fuse the BN parameters into conv layers before Quantization Aware Training (QAT)
             ai8x.fuse_bn_layers(model)
@@ -613,8 +616,12 @@ def main():
             ai8x.pre_qat(model, train_loader, args, qat_policy)
 
             # Update the optimizer to reflect fused batchnorm layers
-            optimizer = ai8x.update_optimizer(model, optimizer)
+            #Print optimizer "alpha" keys
 
+            optimizer = ai8x.update_optimizer(model, optimizer)
+            print(f"LR was {optimizer.param_groups[0]['lr']}")
+            optimizer.param_groups[0]['lr'] = 5e-4
+            print(f"LR is now {optimizer.param_groups[0]['lr']}")
             # Update the compression scheduler to reflect the updated optimizer
             for ep, _ in enumerate(compression_scheduler.policies):
                 for pol in compression_scheduler.policies[ep]:
@@ -629,22 +636,28 @@ def main():
             # Model is re-transferred to GPU in case parameters were added
             model.to(args.device)
 
-            if ddp:
-                model = DistributedDataParallel(
-                    model,
-                    device_ids=[local_rank] if args.device == 'cuda' else None,
-                    output_device=local_rank if args.device == 'cuda' else None,
-                )
+            #if ddp:
+            #    model = DistributedDataParallel(
+            #        model,
+            #        device_ids=[local_rank] if args.device == 'cuda' else None,
+            #        output_device=local_rank if args.device == 'cuda' else None,
+            #    )
 
-            if dynamo:
-                torch._dynamo.reset()  # pylint: disable=protected-access
-                model = torch.compile(model, mode=args.compiler_mode,
-                                      backend=args.compiler_backend)
-                msglogger.info(
-                    'torch.compile() successful, mode=%s, cache limit=%d',
-                    args.compiler_mode,
-                    torch._dynamo.config.cache_size_limit,  # pylint: disable=protected-access
-                )
+            #if dynamo:
+            #    torch._dynamo.reset()  # pylint: disable=protected-access
+            #    model = torch.compile(model, mode=args.compiler_mode,
+            #                          backend=args.compiler_backend)
+
+                # TODO: Optimize DDP is currently not supported with QAT.
+                # Once pytorch supports DDP with higher order ops,
+                # we can enable optimize DDP with QAT.
+                # https://github.com/pytorch/pytorch/issues/104674.
+            #    torch._dynamo.config.optimize_ddp = False  # pylint: disable=protected-access
+            #    msglogger.info(
+            #        'torch.compile() successful, mode=%s, cache limit=%d',
+            #        args.compiler_mode,
+            #        torch._dynamo.config.cache_size_limit,  # pylint: disable=protected-access
+            #    )
 
             # Empty the performance scores list for QAT operation
             perf_scores_history = []
@@ -734,7 +747,7 @@ def main():
     if not args.dr:
         test(test_loader, model, criterion, [pylogger], args=args, mode="ckpt")
         test(test_loader, model, criterion, [pylogger], args=args, mode="best",
-             ckpt_name=checkpoint_name)
+             ckpt_name=checkpoint_name, local_rank=local_rank)
 
     if args.copy_output_folder and local_rank <= 0:
         msglogger.info('Copying output folder to: %s', args.copy_output_folder)
@@ -889,8 +902,11 @@ def train(train_loader, model, criterion, optimizer, epoch,
     model.train()
     acc_stats = []
     end = time.time()
+    #return acc_stats
     for train_step, (inputs, target_temp) in enumerate(train_loader):
         # Measure data loading time
+        #if train_step == 50:
+        #    break
         data_time.add(time.time() - end)
 
         if args.obj_detection:
@@ -1067,7 +1083,7 @@ def validate(val_loader, model, criterion, loggers, args, epoch=-1, tflogger=Non
     return _validate(val_loader, model, criterion, loggers, args, epoch, tflogger)
 
 
-def test(test_loader, model, criterion, loggers, args, mode='ckpt', ckpt_name=None):
+def test(test_loader, model, criterion, loggers, args, mode='ckpt', ckpt_name=None, local_rank=0):
     """Model Test"""
     assert msglogger is not None
     if mode == 'ckpt':
@@ -1075,11 +1091,32 @@ def test(test_loader, model, criterion, loggers, args, mode='ckpt', ckpt_name=No
         top1, top5, vloss, mAP = _validate(test_loader, model, criterion, loggers, args)
     else:
         msglogger.info('--- test (best) ---------------------')
-        if ckpt_name is None:
-            best_ckpt_path = os.path.join(msglogger.logdir, 'best.pth.tar')
-        else:
-            best_ckpt_path = os.path.join(msglogger.logdir, ckpt_name + "_best.pth.tar")
-        model = apputils.load_lean_checkpoint(model, best_ckpt_path)
+        model, dynamo, _ = model_wrapper.unwrap(model)
+        if local_rank <= 0:
+            if ckpt_name is None:
+                best_ckpt_path = os.path.join(msglogger.logdir, 'best.pth.tar')
+            else:
+                best_ckpt_path = os.path.join(msglogger.logdir, ckpt_name + "_best.pth.tar")
+            model = apputils.load_lean_checkpoint(model, best_ckpt_path)
+
+        #if ddp:
+        #    model = DistributedDataParallel(
+        #        model,
+        #        device_ids=[local_rank] if args.device == 'cuda' else None,
+        #        output_device=local_rank if args.device == 'cuda' else None,
+        #    )
+
+        if dynamo:
+            torch._dynamo.reset()  # pylint: disable=protected-access
+            model = torch.compile(model, mode=args.compiler_mode,
+                                  backend=args.compiler_backend)
+            torch._dynamo.config.optimize_ddp = False  # pylint: disable=protected-access
+            msglogger.info(
+                'torch.compile() successful, mode=%s, cache limit=%d',
+                args.compiler_mode,
+                torch._dynamo.config.cache_size_limit,  # pylint: disable=protected-access
+            )
+
         top1, top5, vloss, mAP = _validate(test_loader, model, criterion, loggers, args)
 
     return top1, top5, vloss, mAP
@@ -1130,6 +1167,8 @@ def _validate(data_loader, model, criterion, loggers, args, epoch=-1, tflogger=N
         m = model.module if isinstance(model, DistributedDataParallel) else model
 
         for validation_step, (inputs, target_temp) in enumerate(data_loader):
+            #if validation_step == 3:
+            #    break
             if args.obj_detection:
                 if not object_detection_utils.check_target_exists(target_temp):
                     msglogger.info('No target in batch. Ep: %d, '

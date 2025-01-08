@@ -58,7 +58,10 @@ class MultiBoxLoss(nn.Module):
         self.neg_pos_ratio = neg_pos_ratio
         self.alpha = alpha
 
-        self.smooth_l1 = nn.SmoothL1Loss(reduction='mean')
+        self.smooth_l1 = nn.SmoothL1Loss(reduction='mean', beta=0.1)
+        self.smooth_l1_kpts = nn.SmoothL1Loss(reduction='mean', beta=0.001)
+        #self.beta = 2
+        #self.theta = 0
         self.cross_entropy = nn.CrossEntropyLoss(reduction='none')
 
         self.device = device
@@ -171,10 +174,36 @@ class MultiBoxLoss(nn.Module):
         # Localization loss is computed only over positive (non-background) priors
         loc_loss = self.smooth_l1(predicted_locs[positive_priors][:, :4],
                                   true_locs[positive_priors])
+
+        #size_predicted = predicted_locs[positive_priors][:, 2:4] - predicted_locs[positive_priors][:, :2]
+        #size_true = true_locs[positive_priors][:, 2:4] - true_locs[positive_priors][:, :2]
+        #size_diff = (size_true - size_predicted).clamp(min=0)
+        #loc_loss_size = size_diff.mean()
+
         loc_loss_kpts = 0.0
+
+
         for i in range(n_kpts):
-            loc_loss_kpts += self.smooth_l1(predicted_locs[positive_priors][:, (2*i+4):(2*i+6)],
+            loc_loss_kpts += self.smooth_l1_kpts(predicted_locs[positive_priors][:, (2*i+4):(2*i+6)],
                                             true_kpts[positive_priors][:, (2*i):(2*i+2)])
+
+        #parallel_loss = 0.0
+        #for i in range(n_kpts // 4):
+            #predicted_line1 = predicted_locs[positive_priors][:, (2*i+4):(2*i+6)] - \
+            #    predicted_locs[positive_priors][:, (2*i+6):(2*i+8)]
+            #predicted_line2 = predicted_locs[positive_priors][:, (2*i+8):(2*i+10)] - \
+            #     predicted_locs[positive_priors][:, (2*i+10):(2*i+12)]
+            #angle_diff = torch.atan2(predicted_line1[:, 1], predicted_line1[:, 0]) - \
+            #     torch.atan2(predicted_line2[:, 1], predicted_line2[:, 0])
+            #parallel_loss += torch.abs(angle_diff).mean()
+
+            #predicted_line3 = predicted_locs[positive_priors][:, (2*i+4):(2*i+6)] - \
+            #    predicted_locs[positive_priors][:, (2*i+8):(2*i+10)]
+            #predicted_line4 = predicted_locs[positive_priors][:, (2*i+6):(2*i+8)] - \
+            #        predicted_locs[positive_priors][:, (2*i+10):(2*i+12)]
+            #angle_diff = torch.atan2(predicted_line3[:, 1], predicted_line3[:, 0]) - \
+            #        torch.atan2(predicted_line4[:, 1], predicted_line4[:, 0])
+            #parallel_loss += torch.abs(angle_diff).mean()
 
         # Note: indexing with a torch.uint8 (byte) tensor flattens the tensor when indexing is
         # across multiple dimensions (N & number_of_priors)
@@ -218,7 +247,11 @@ class MultiBoxLoss(nn.Module):
             conf_loss = \
                 (conf_loss_hard_neg.sum() + conf_loss_pos.sum()) / n_positives.sum().float()
             # (), scalar
-
+            #print(f'Confidence Loss: {conf_loss.item()}')
+            #print(f'Localization Loss: {loc_loss.item()}')
+            #print(f'Keypoints Loss: {loc_loss_kpts.item()}')
+            #print(f'Parallel Loss: {parallel_loss.item()}')
+            #print(f'Size Loss: {loc_loss_size.item()}')
             # TOTAL LOSS
             return conf_loss + self.alpha * (loc_loss + loc_loss_kpts)
 

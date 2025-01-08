@@ -1,0 +1,2 @@
+#!/bin/sh
+python3 train.py --deterministic --epochs 120 --optimizer SGD --lr 0.1 --wd 1e-4 --momentum 0.9 --data /data_ssd --compress policies/schedule-imagenet-resnet.yaml --model ai8x_pt_resnet18  --dataset ImageNet_224_224 --resume-from logs/2024.12.24-210349/checkpoint.pth.tar --device MAX78002 --batch-size 256 --print-freq 1 --validation-split 0 --fake-act-quant --lsq-weight-scale --use-bias --qat-policy policies/qat_policy_imagenet_resnet.yaml "$@"

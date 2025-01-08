@@ -18,7 +18,7 @@ import torch
 from torch import nn
 from torch.autograd import Function
 from torch.fx import symbolic_trace
-
+import math
 from tqdm import tqdm
 
 import devices
@@ -102,9 +102,21 @@ class QuantizationFunction(Function):
     # pylint: disable=abstract-method
 
     @staticmethod
-    def forward(_, x, bits=8, extra_bit_shift=0):  # pylint: disable=arguments-differ
+    def forward(_, x, bits=8, extra_bit_shift=0, per_channel=False):  # pylint: disable=arguments-differ
         """Forward prop"""
-        if dev.simulate:
+        if dev.fakeactquant:
+            if per_channel:
+                step_size = (2 ** extra_bit_shift) / (2 ** (bits - 1))
+                if len(x.shape) == 2:
+                    step_size = step_size.to(x.device).view(1, -1)
+                else:
+                    step_size = step_size.to(x.device).view(1, -1, 1, 1)  # Reshape for broadcasting
+                #print("Step Size.shape", step_size.shape)
+                #print("X.shape", x.shape)
+                return x.div(step_size).round()
+            step_size = 2**(extra_bit_shift) / 2**(bits-1)
+            return x.div(step_size).round()
+        elif dev.simulate:
             if bits > 1:
                 return x.div(2**(bits+extra_bit_shift-1)).add(.5).floor()
             if bits < 1:
@@ -120,7 +132,199 @@ class QuantizationFunction(Function):
         """Backprop"""
         # Straight through - return as many input gradients as there were arguments;
         # gradients of non-Tensor arguments to forward must be None.
-        return x, None, None
+        return x, None, None, None
+
+
+class QuantizationFunctionwoRound(nn.Module):
+    """
+    Custom autograd function
+    The forward pass divides by 2**(bits-1) (typically, 128) and rounds the result to the
+    nearest integer.
+    The backward pass is straight through.
+    """
+    # pylint: disable=abstract-method
+
+    def __init__(self):
+        super().__init__()
+
+    def forward(self, x, bits=8, extra_bit_shift=0, per_channel=False):  # pylint: disable=arguments-differ
+        """Forward prop"""
+        if dev.fakeactquant:
+            if per_channel:
+                step_size = (2 ** extra_bit_shift) / (2 ** (bits - 1))
+                if len(x.shape) == 2:
+                    step_size = step_size.to(x.device).view(1, -1)
+                else:
+                    step_size = step_size.to(x.device).view(1, -1, 1, 1)  # Reshape for broadcasting
+                #print("Step Size.shape", step_size.shape)
+                #print("X.shape", x.shape)
+                return x.div(step_size)
+            step_size = 2**(extra_bit_shift) / 2**(bits-1)
+            return x.div(step_size)
+        else:
+            print("Not implemented")
+            exit(1)
+
+
+class DequantizationFunctionwoRound(nn.Module):
+
+    def __init__(self):
+        super().__init__()
+
+    def forward(self, x, bits, scale_factor, per_channel=False):
+        """
+        Dequantize the tensor with the given scale factor
+        """
+        if per_channel:
+            step_size = (2.0 ** scale_factor) / (2.0 ** (bits - 1))
+            if len(x.shape) == 2:
+                step_size = step_size.to(x.device).view(1, -1)
+            else:
+                step_size = step_size.to(x.device).view(1, -1, 1, 1)
+            return x.mul(step_size)
+        step_size = (2.**scale_factor) / 2.**(bits-1)
+        return x.mul(step_size)
+
+
+class RoundClamp(Function):
+    """
+    Custom autograd function
+    The forward pass divides by 2**(bits-1) (typically, 128) and rounds the result to the
+    nearest integer.
+    The backward pass is straight through.
+    """
+    # pylint: disable=abstract-method
+
+    @staticmethod
+    def forward(ctx, x, bits):  # pylint: disable=arguments-differ
+        """Forward prop"""
+        x_out = x.round().clamp(min=-2**(bits-1), max=2**(bits-1) - 1)
+        ctx.save_for_backward(torch.clamp(x - x_out, min=-1, max=1))
+        ctx.bits = bits
+
+        return x_out
+
+    @staticmethod
+    def backward(ctx, grad_output):  # pylint: disable=arguments-differ
+        """Backprop"""
+        # Straight through - return as many input gradients as there were arguments;
+        # gradients of non-Tensor arguments to forward must be None.
+        diff = ctx.saved_tensors[0]
+        scale = 1 + torch.sign(grad_output)*diff*0.01
+        return grad_output * scale, None
+
+
+class RoundClampSTE(Function):
+    """
+    Custom autograd function
+    The forward pass divides by 2**(bits-1) (typically, 128) and rounds the result to the
+    nearest integer.
+    The backward pass is straight through.
+    """
+    # pylint: disable=abstract-method
+
+    @staticmethod
+    def forward(ctx, x, bits):  # pylint: disable=arguments-differ
+        """Forward prop"""
+        x_out = x.round().clamp(min=-2**(bits-1), max=2**(bits-1) - 1)
+        #ctx.save_for_backward(torch.clamp(x - x_out, min=-1, max=1))
+        #ctx.bits = bits
+
+        return x_out
+
+    @staticmethod
+    def backward(ctx, grad_output):  # pylint: disable=arguments-differ
+        """Backprop"""
+        # Straight through - return as many input gradients as there were arguments;
+        # gradients of non-Tensor arguments to forward must be None.
+        #diff = ctx.saved_tensors[0]
+        #scale = 1 + torch.sign(grad_output)*diff*0.01
+        #return grad_output * scale, None
+        return grad_output, None
+
+
+class FakeQuantizeWeightv2(nn.Module):
+    """
+    Fake quantization module
+    """
+    def __init__(self, bits=8, per_channel=False):
+        super().__init__()
+        self.bits = bits
+        self.per_channel = per_channel
+        self.q_func = QuantizationFunctionwoRound()
+        self.dq_func = DequantizationFunctionwoRound()
+        #print("Clamp", clamp)
+
+    def forward(self, x, scale):  # pylint: disable=arguments-differ
+        """Forward prop"""
+        #print("Scale", scale)
+        #print("Before Quantization")
+        #for i in range(x.shape[1]):
+        #    print("Channel", i, x[:, i].min(), x[:, i].max())
+        x = self.q_func(x, self.bits, scale, self.per_channel)
+        #print("After Quantization")
+        #for i in range(x.shape[1]):
+        #    print("Channel", i, x[:, i].min(), x[:, i].max())
+        #print(x.min(), x.max())
+        #x = RoundClamp.apply(x, self.bits)
+        x = RoundClampSTE.apply(x, self.bits)
+        #print(x.min(), x.max())
+        #print("After Clamp")
+        #for i in range(x.shape[1]):
+        #    print("Channel", i, x[:, i].min(), x[:, i].max())
+        x = self.dq_func(x, self.bits, scale, self.per_channel)
+        #for i in range(x.shape[1]):
+        #    print("Channel", i, x[:, i].min(), x[:, i].max())
+        return x
+
+
+class FakeQuantizeActv2(nn.Module):
+    """
+    Fake quantization module
+    """
+    def __init__(self, scale):
+        super().__init__()
+        self.scale = scale
+        self.q_func = QuantizationFunctionwoRound()
+        self.dq_func = DequantizationFunctionwoRound()
+
+    def forward(self, x):  # pylint: disable=arguments-differ
+        """Forward prop"""
+        #print("ACT", self.scale)
+        #print("Before Quantization", x.min(), x.max())
+        #x = ai8x.QuantizationFunctionwoRound(x, ai8x.dev.ACTIVATION_BITS, self.scale)
+        x = self.q_func(x, dev.ACTIVATION_BITS, self.scale)
+        #print("After Quantization", x.min(), x.max())
+        x = RoundClamp.apply(x, dev.ACTIVATION_BITS)
+        #print("After Clamp", x.min(), x.max())
+        #x = ai8x.DequantizationFunctionwoRound(x, ai8x.dev.ACTIVATION_BITS, self.scale)
+        x = self.dq_func(x, dev.ACTIVATION_BITS, self.scale)
+        #print("After Dequantization", x.min(), x.max())
+        return x
+
+
+class FakeQuantizePoolv2(nn.Module):
+    """
+    Fake quantization module
+    """
+    def __init__(self):
+        super().__init__()
+        self.q_func = QuantizationFunctionwoRound()
+        self.dq_func = DequantizationFunctionwoRound()
+
+    def forward(self, x, scale):  # pylint: disable=arguments-differ
+        """Forward prop"""
+        #print("ACT", self.scale)
+        #print("Before Quantization", x.min(), x.max())
+        #x = ai8x.QuantizationFunctionwoRound(x, ai8x.dev.ACTIVATION_BITS, self.scale)
+        x = self.q_func(x, dev.ACTIVATION_BITS, scale)
+        #print("After Quantization", x.min(), x.max())
+        x = RoundClamp.apply(x, dev.ACTIVATION_BITS)
+        #print("After Clamp", x.min(), x.max())
+        #x = ai8x.DequantizationFunctionwoRound(x, ai8x.dev.ACTIVATION_BITS, self.scale)
+        x = self.dq_func(x, dev.ACTIVATION_BITS, scale)
+        #print("After Dequantization", x.min(), x.max())
+        return x
 
 
 class Quantize(nn.Module):
@@ -137,6 +341,141 @@ class Quantize(nn.Module):
         """Forward prop"""
         return QuantizationFunction.apply(x, self.num_bits, self.num_extra_bit_shift)
 
+
+class FakeQuantizeWeight(nn.Module):
+    """
+    Fake quantization module
+    """
+    def __init__(self, clamp=None, bits=8, per_channel=False):
+        super().__init__()
+        self.clamp = clamp
+        self.bits = bits
+        self.per_channel = per_channel
+        #print("Clamp", clamp)
+
+    def forward(self, x, scale):  # pylint: disable=arguments-differ
+        """Forward prop"""
+        #print("Scale", scale)
+        #print("Before Quantization")
+        #for i in range(x.shape[1]):
+        #    print("Channel", i, x[:, i].min(), x[:, i].max())
+        x = QuantizationFunction.apply(x, self.bits, scale, self.per_channel)
+        #print("After Quantization")
+        #for i in range(x.shape[1]):
+        #    print("Channel", i, x[:, i].min(), x[:, i].max())
+        x = self.clamp(x)
+        #print("After Clamp")
+        #for i in range(x.shape[1]):
+        #    print("Channel", i, x[:, i].min(), x[:, i].max())
+        x = DequantizationFunction.apply(x, self.bits, scale, self.per_channel)
+        #for i in range(x.shape[1]):
+        #    print("Channel", i, x[:, i].min(), x[:, i].max())
+        return x
+
+
+class FakeQuantizeAct(nn.Module):
+    """
+    Fake quantization module
+    """
+    def __init__(self, scale, clamp=None):
+        super().__init__()
+        self.scale = scale
+        self.clamp = clamp
+
+    def forward(self, x):  # pylint: disable=arguments-differ
+        """Forward prop"""
+        #print("ACT", self.scale)
+        #print("Before Quantization", x.min(), x.max())
+        x = QuantizationFunction.apply(x, dev.ACTIVATION_BITS, self.scale)
+        #print("After Quantization", x.min(), x.max())
+        x = self.clamp(x)
+        #print("After Clamp", x.min(), x.max())
+        x = DequantizationFunction.apply(x, dev.ACTIVATION_BITS, self.scale)
+        #print("After Dequantization", x.min(), x.max())
+        return x
+
+
+
+class FakeQuantizePool(nn.Module):
+    """
+    Fake quantization module
+    """
+    def __init__(self, clamp=None):
+        super().__init__()
+        self.clamp = clamp
+
+    def forward(self, x, scale):  # pylint: disable=arguments-differ
+        """Forward prop"""
+        #print("POOL", scale)
+        #print("Before Quantization", x.min(), x.max())
+        x = QuantizationFunction.apply(x, dev.ACTIVATION_BITS, scale)
+        #print("After Quantization", x.min(), x.max())
+        x = self.clamp(x)
+        #print("After Clamp", x.min(), x.max())
+        x = DequantizationFunction.apply(x, dev.ACTIVATION_BITS, scale)
+        #print("After Dequantization", x.min(), x.max())
+        return x
+
+
+class FakeGradModifierAct(Function):
+
+    @staticmethod
+    def forward(ctx, x, function):
+        x_out = function(x)
+        ctx.save_for_backward(x - x_out)
+        ctx.bits = torch.log2(torch.tensor(dev.ACTIVATION_BITS / 8))
+        ctx.scale = function.scale
+        #ctx.sigma = torch.clamp(1/(2*torch.std(x)), max=0.5)  # std(x) = 1 => sigma = 0.5, std(x) = 2 => sigma = 0.25
+        #print("sigma act", torch.std(x))
+
+        return x_out
+
+    @staticmethod
+    def backward(ctx, grad_output):
+        diff = ctx.saved_tensors[0]
+        scale = 1 + torch.sign(grad_output)*diff* torch.exp2(ctx.bits - ctx.scale)
+
+        return grad_output * scale, None, None
+
+class FakeGradModifierPool(Function):
+
+        @staticmethod
+        def forward(ctx, x, scale, function):
+            x_out = function(x, scale)
+            ctx.save_for_backward(x - x_out)
+            ctx.bits = torch.log2(torch.tensor(dev.ACTIVATION_BITS / 8))
+            ctx.scale = scale
+            #ctx.sigma = torch.clamp(1/(2*torch.std(x)), max=0.5)  # std(x) = 1 => sigma = 0.5, std(x) = 2 => sigma = 0.25
+            #print("sigma pool", torch.std(x))
+
+            return x_out
+
+        @staticmethod
+        def backward(ctx, grad_output):
+            diff = ctx.saved_tensors[0]
+            scale = 1 + torch.sign(grad_output)*diff* torch.exp2(ctx.bits - ctx.scale)
+
+            return grad_output * scale, None, None, None
+
+
+class FakeGradModifierWeight(Function):
+    @staticmethod
+    def forward(ctx, x, scale, function):
+        x_out = function(x, scale)
+        ctx.save_for_backward(x - x_out)
+        ctx.bits = torch.log2(torch.tensor(function.bits / 8))
+        ctx.scale = scale
+        #ctx.sigma = torch.clamp(1/(2*torch.std(x)), max=0.5)  # std(x) = 1 => sigma = 0.5, std(x) = 2 => sigma = 0.25
+        #print("sigma weight", torch.std(x))
+
+        return x_out
+
+    @staticmethod
+    def backward(ctx, grad_output):
+        diff = ctx.saved_tensors[0]
+        scale = 1 + torch.sign(grad_output)*diff* torch.exp2(ctx.bits - ctx.scale)
+
+        return grad_output * scale, None, None, None
 
 class FloorFunction(Function):
     """
@@ -258,6 +597,8 @@ class Clamp(nn.Module):
         return x.clamp(max=self.max_val)
 
 
+
+
 class Scaler(nn.Module):
     """
     Scaler module that considers integer quantization
@@ -335,7 +676,7 @@ def quantize_clamp(wide, quantize_activation=False, clamp_activation=False, weig
     """
     Return new Quantization and Clamp objects.
     """
-    if dev.simulate:
+    if dev.simulate or dev.fakeactquant:
         if not wide:
             quantize = Quantize(num_bits=dev.DATA_BITS)
             clamp = Clamp(
@@ -378,7 +719,7 @@ def quantize_clamp_pool(pooling, quantize_activation=False, clamp_activation=Fal
     """
     Return new Quantization and Clamp objects for pooling.
     """
-    if dev.simulate:
+    if dev.simulate or dev.fakeactquant:
         if pooling == 'Avg':
             quantize = Round() if dev.round_avg else AvgPoolFloor()
             clamp = Clamp(
@@ -403,6 +744,115 @@ def quantize_clamp_pool(pooling, quantize_activation=False, clamp_activation=Fal
     return quantize, clamp
 
 
+def find_pool_scale(x):
+    """
+    Estimate the scale factor from the pre-pooling tensor
+    """
+    scale_factor = x.abs().max()
+    scale_factor = scale_factor.log2().ceil().clamp(min=0.)
+    return scale_factor
+
+class DequantizationFunction(Function):
+
+    @staticmethod
+    def forward(_, x, bits, scale_factor, per_channel=False):
+        """
+        Dequantize the tensor with the given scale factor
+        """
+        if per_channel:
+            step_size = (2.0 ** scale_factor) / (2.0 ** (bits - 1))
+            if len(x.shape) == 2:
+                step_size = step_size.to(x.device).view(1, -1)
+            else:
+                step_size = step_size.to(x.device).view(1, -1, 1, 1)
+            return x.mul(step_size)
+        step_size = (2.**scale_factor) / 2.**(bits-1)
+        return x.mul(step_size)
+
+    def backward(_, x):  # pylint: disable=arguments-differ
+        """Backprop"""
+        # Straight through - return as many input gradients as there were arguments;
+        # gradients of non-Tensor arguments to forward must be None.
+        return x, None, None, None
+
+###From TQT implementation
+def number_to_tensor(x, t):
+    r'''
+    Turn x in to a tensor with data type like tensor t.
+    '''
+    return torch.tensor(x).type_as(t)
+
+
+class RoundToEven(Function):
+    @staticmethod
+    def forward(ctx, input):
+        return torch.round(input)
+
+    @staticmethod
+    def backward(ctx, grad_output):
+        return torch.ones(grad_output.shape).type_as(grad_output)
+
+
+class Ceil(Function):
+    @staticmethod
+    def forward(ctx, input):
+        output = torch.ceil(input)
+        return output
+
+    @staticmethod
+    def backward(ctx, grad_output):
+        return torch.ones(grad_output.shape).type_as(grad_output)
+
+
+class qSigned(Function):
+    @staticmethod
+    def forward(ctx, x, log2_t, bit_width):
+        r'''
+        See TQT paper's Eqn. (4)
+        '''
+        bit_max = 2.**(bit_width - 1)
+        n = -bit_max
+        p = bit_max - 1
+        s = 2.**Ceil.apply(log2_t) / bit_max
+        q = torch.clamp(RoundToEven.apply(x / s), n, p) * s
+        ctx.save_for_backward(x / s, s, number_to_tensor(n, x),
+                              number_to_tensor(p, x))
+        return q
+
+    @staticmethod
+    def backward(ctx, grad_output):
+        x_div_s, s, n, p = ctx.saved_tensors
+        rounded = RoundToEven.apply(x_div_s)
+        cmp0 = (n <= rounded) & (rounded <= p)
+        cmp1 = rounded < n
+        cmp2 = rounded > p
+        grad_s = (rounded - x_div_s) * cmp0 + n * cmp1 + p * cmp2
+        grad_log_2_t = math.log(2) * grad_s * s
+        grad_x = cmp0 * 1.0
+        return grad_output * grad_x, grad_output * grad_log_2_t, None
+
+class PoTAlpha(Function):
+
+    @staticmethod
+    def forward(_, alpha):
+        """
+        Dequantize the tensor with the given scale factor
+        """
+        return alpha.ceil().clamp(min=-15., max=15.)
+
+    def backward(_, x):  # pylint: disable=arguments-differ
+        """Backprop"""
+        # Straight through - return as many input gradients as there were arguments;
+        # gradients of non-Tensor arguments to forward must be None.
+        return torch.ones(x.shape).type_as(x)
+
+
+def grad_scale(x, scale):
+    y = x
+    y_grad = x * scale
+    return y.detach() - y_grad.detach() + y_grad
+
+
 def quantize_clamp_parameters(weight_bits, bias_bits):
     """
     Return new Quantization and Clamp objects for weight and bias parameters
@@ -412,6 +862,18 @@ def quantize_clamp_parameters(weight_bits, bias_bits):
         quantize_bias = Quantize(num_bits=2*(weight_bits-dev.DATA_BITS)+1)
         clamp_weight = Empty()
         clamp_bias = Empty()
+    elif dev.fakeactquant:
+        quantize_weight = Quantize(num_bits=weight_bits)
+        quantize_bias = Quantize(num_bits=bias_bits)
+        #TODO: Check if this is correct
+        clamp_weight = Clamp(
+            min_val=-(2.**(weight_bits-1)),
+            max_val=2.**(weight_bits-1)-1,
+        )
+        clamp_bias = Clamp(
+            min_val=-(2.**(bias_bits-1)),
+            max_val=2.**(bias_bits-1)-1,
+        )
     else:
         if weight_bits == 0 and bias_bits == 0:
             quantize_weight = Empty()
@@ -437,56 +899,32 @@ class OutputShiftPassthrough(nn.Module):
         return x
 
 
-def interp(x, xp, fp, method='linear'):
-    """
-    Simple PyTorch implementation of `np.interp`.
-    1D data only, length must be 2 or greater.
-    `method` must be "linear" or "lower".
-    """
-    # Find the index
-    n = len(xp) - 1
-    if n == 0:
-        return fp[0]
-    if x == 1.:
-        return fp[-1]
-    i = torch.clip(torch.searchsorted(xp, x, side='right').unsqueeze(0), 1, n) - 1
-    # Calculate fractional index
-    if method == 'linear':
-        g = x * n - i
-    else:
-        assert method == 'lower'
-        g = .0
-    # Interpolate result
-    return fp[i] + g * (fp[i + 1] - fp[i])
-
-
-def quantile(x, q, method='linear'):
-    """
-    Ersatz quantile function in PyTorch that works with torch.compile().
-    1D data only, len(x) must be 2 or greater.
-    `method` must be "linear" or "lower".
-    """
-    x = x.flatten()
-    n = len(x)
-    return interp(
-        q,
-        torch.linspace(1 / (2 * n), (2 * n - 1) / (2 * n), n, device=x.device),
-        torch.sort(x)[0],
-        method,
-    ).squeeze(0)
-
-
 class OutputShiftLimit(nn.Module):
     """
     Calculate the clamped output shift when adjusting during quantization-aware training.
     """
-    def __init__(self, shift_quantile=1.0):
+    def __init__(self, shift_quantile=1.0, per_channel=False):
         super().__init__()
         self.shift_quantile = shift_quantile
+        self.per_channel = per_channel
+        #print("Per Channel", per_channel)
 
     def forward(self, x, _):  # pylint: disable=arguments-differ
         """Forward prop"""
-        limit = quantile(x.abs(), self.shift_quantile)
+        if self.per_channel:
+            # Get the per-channel limit
+            if len(x.shape) == 2:
+                abs_x = x.abs().permute(1, 0).reshape(x.shape[1], -1)
+            else:
+                abs_x = x.abs().permute(1, 0, 2, 3).reshape(x.shape[1], -1)
+
+            # Compute quantiles along the batch dimension (dim=0)
+            limits = torch.quantile(abs_x, self.shift_quantile, dim=1, keepdim=True)  # Assuming quantile supports `dim`
+            # Compute -(1. / limit).log2().floor().clamp(min=-15, max=15)
+            return -(1. / limits).log2().floor().clamp(min=-15., max=15.)
+
+
+        limit = torch.quantile(x.abs(), self.shift_quantile)
         return -(1./limit).log2().floor().clamp(min=-15., max=15.)
 
 
@@ -571,6 +1009,8 @@ def get_activation(activation=None):
     if activation == 'Abs':
         assert dev.device != 84
         return Abs()
+    if activation == 'ReLU6':
+        return nn.ReLU6(inplace=True)
     return Empty()
 
 
@@ -596,6 +1036,18 @@ def calc_q_error(module, threshold, bits, eps=1e-9):
         / torch.sum(module.hist[0])
 
     return err
+
+
+def calc_q_error_weight(weight, threshold, bits, qfunction):
+    """
+    Weight quantization error calculation
+    """
+    logt = threshold.log2()
+    quantized_hist = qfunction.apply(weight, logt, bits)
+    err = torch.sum(((quantized_hist - weight)**2)) / torch.numel(weight)
+
+    return err
+
 
 
 def _merge_hist(module):
@@ -720,6 +1172,33 @@ def calc_threshold(module, iterations=5, bits=8):
     module.activation_threshold = nn.Parameter(torch.log2(t), requires_grad=False)
 
 
+def calc_threshold_weight(weight, iterations=5, bits=8):
+    """
+    Iteratively calculate threshold for weight quantization
+    """
+    e_min = torch.inf
+    outlier_removal_z_score = 3
+    mean = weight.mean()
+    std = weight.std()
+    clamp_min = mean - outlier_removal_z_score * std
+    clamp_max = mean + outlier_removal_z_score * std
+    weight = weight.clamp(min=clamp_min, max=clamp_max)
+    t_nc = weight.abs().max().log2().ceil().exp2()
+    t = None
+    qfunction = qSigned()
+    best_i = 0
+    for i in range(iterations):
+        t_i = t_nc / (2**i)
+        e_i = calc_q_error_weight(weight, t_i, bits, qfunction)
+        if e_i < e_min:
+            e_min = e_i
+            best_i = i
+            t = t_i
+    print("best_i:", best_i)
+    return t.log2().ceil()
+    
+
+
 class QuantizationAwareModule(nn.Module):
     """
     Common code for Quantization-Aware Training
@@ -767,6 +1246,13 @@ class QuantizationAwareModule(nn.Module):
         self.pooling = pooling
 
         self.output_shift = nn.Parameter(torch.tensor([0.]), requires_grad=False)
+   
+        if dev.per_channel:
+            out_channels = self.op.weight.shape[0]
+            print("Out Channels", out_channels)
+            self.alpha = nn.Parameter(torch.tensor(out_channels))
+        else:
+            self.alpha = nn.Parameter(torch.tensor(1.))
         # Activation threshold determined during QAT, used in quantization
         # It determines the range of quantization
         self.activation_threshold = nn.Parameter(torch.tensor(0.), requires_grad=False)
@@ -785,6 +1271,7 @@ class QuantizationAwareModule(nn.Module):
             export=False,
     ):
         """Initialize model parameters"""
+        print("FP bias for testing")
         if weight_bits is None and bias_bits is None and not quantize_activation:
             if not export:
                 self.weight_bits = nn.Parameter(torch.tensor([0]), requires_grad=False)
@@ -813,12 +1300,13 @@ class QuantizationAwareModule(nn.Module):
     def set_functions(self):
         """Set functions to be used wrt the model parameters"""
         if self.adjust_output_shift.detach():
-            self.calc_out_shift = OutputShiftLimit(self.shift_quantile.detach().item())
+            #print("Dev per channel", dev.per_channel)
+            self.calc_out_shift = OutputShiftLimit(self.shift_quantile.detach().item(), dev.per_channel)
             self.calc_weight_scale = WeightScale()
         else:
             self.calc_out_shift = OutputShiftPassthrough()
             self.calc_weight_scale = One()
-
+        
         self.scale = Scaler()
         self.calc_out_scale = OutputScale()
 
@@ -833,42 +1321,111 @@ class QuantizationAwareModule(nn.Module):
             quantize_clamp_pool(self.pooling, bool(self.quantize_activation.detach().item()),
                                 bool(self.clamp_activation.detach().item()))
 
+
+        if dev.lsq_weight_scale and self.adjust_output_shift.detach() and self.op is not None:
+            #self.alpha.data.copy_(2 * self.op.weight.abs().mean() / math.sqrt(2**self.weight_bits.detach().item() - 1))
+            params_r = torch.flatten(self.op.weight.detach())
+            #self.alpha.data.copy_(torch.exp2(self.calc_out_shift(params_r, self.output_shift.detach())))
+            print("Alpha was", self.alpha)
+            self.alpha.data.copy_(calc_threshold_weight(self.op.weight, iterations=5, bits=self.weight_bits.detach().item()))
+            #self.alpha.data.copy_(self.calc_out_shift(params_r, self.output_shift.detach()))
+            print("Alpha now", self.alpha)
+            #print("op weight numel", self.op.weight.numel())
+            #self.g = 1.0 / math.sqrt(self.op.weight.numel() * (2**self.weight_bits.detach().item() - 1))
+    
+        self.FakeQuantizeAct = FakeQuantizeAct(self.activation_threshold.detach().item(),
+                                               self.clamp)
+        
+        #FakeQuantizeActv2(self.activation_threshold.detach().item())
+                            #
+        self.FakeQuantizePool = FakeQuantizePool(self.clamp_pool)
+        
+        #FakeQuantizePoolv2()
+
+        #self.FakeQuantizeWeight = FakeQuantizeWeightv2(self.weight_bits.detach().item(), dev.per_channel)#FakeQuantizeWeight(self.clamp_weight, self.weight_bits.detach().item(), dev.per_channel)
+        self.FakeQuantizeWeight = qSigned()
+
     def forward(self, x):  # pylint: disable=arguments-differ
         """Forward prop"""
         if self.pool is not None:
-            x = self.clamp_pool(self.quantize_pool(self.pool(x)))
+            if not dev.fakeactquant:
+            #if True:
+                x = self.clamp_pool(self.quantize_pool(self.pool(x)))
+            else:
+                pool_scale = find_pool_scale(x)
+
+                x = self.pool(x)
+                x = self.FakeQuantizePool(x, pool_scale)
+                #x = FakeGradModifierPool.apply(x, pool_scale, self.FakeQuantizePool)
+
+
         if self.op is not None:
-            if self.op.bias is not None:
+            if self.op.bias is not None and not dev.fakeactquant:
                 bias_r = torch.flatten(self.op.bias.detach())
                 weight_r = torch.flatten(self.op.weight.detach())
                 params_r = torch.cat((weight_r, bias_r))
             else:
-                params_r = torch.flatten(self.op.weight.detach())
-            out_shift = self.calc_out_shift(params_r, self.output_shift.detach())
-            weight_scale = self.calc_weight_scale(out_shift)
+                if not dev.per_channel:
+                    params_r = torch.flatten(self.op.weight.detach())
+                else:
+                    params_r = self.op.weight.detach()
+            if dev.lsq_weight_scale and self.adjust_output_shift.detach():
+                pass
+                #alpha = grad_scale(self.alpha, self.g)
+                #Prevent alpha from going to 0
+                #alpha = alpha.clamp(min=1e-9).log2()
+                #out_shift = PoTAlpha.apply(alpha)
+                #print("alpha grad", alpha.grad)
+                #print("self.alpha.grad", self.alpha.grad)
+                #print("Out Shift grad", out_shift.grad)
+                #print("Out Shift", out_shift)
+                #print("Alpha", alpha)
+                #print("self.alpha", self.alpha)
+                #print("Alpha", alpha)
+            else:
+                out_shift = self.calc_out_shift(params_r, self.output_shift.detach())
+                weight_scale = self.calc_weight_scale(out_shift)
 
             # Quantized checkpoint will have subtracted threshold from output shift
             # Therefore, it shouldn't be done again in simulate mode
-            if not dev.simulate:
+            if not dev.simulate and not dev.fakeactquant:
                 out_shift = (out_shift - self.activation_threshold).clamp(min=-15., max=15.)
 
-            out_scale = self.calc_out_scale(out_shift)
-            x = self._conv_forward(  # pylint: disable=protected-access
-                x,
-                self.clamp_weight(self.quantize_weight(self.op.weight.mul(weight_scale))),
-                None if self.op.bias is None
-                else self.clamp_bias(self.quantize_bias(self.op.bias.mul(weight_scale))),
-            )
+                out_scale = self.calc_out_scale(out_shift)
+            if not dev.fakeactquant:
+            #if True:
+                x = self._conv_forward(  # pylint: disable=protected-access
+                    x,
+                    self.clamp_weight(self.quantize_weight(self.op.weight.mul(weight_scale))),
+                    None if self.op.bias is None
+                    else self.clamp_bias(self.quantize_bias(self.op.bias.mul(weight_scale))),
+                    #self.op.bias,
+                )
+            else:
+                x = self._conv_forward(  # pylint: disable=protected-access
+                    x,
+                    self.FakeQuantizeWeight.apply(self.op.weight, self.alpha, self.weight_bits.detach().item()),
+                    #self.FakeQuantizeWeight(self.op.weight, out_shift),
+                    #FakeGradModifierWeight.apply(self.op.weight, out_shift, self.FakeQuantizeWeight),
+                    self.op.bias,
+                )
 
             if self.bn is not None:
                 x = self.bn(x)
-            if not self.wide:
+
+            if not self.wide and not dev.fakeactquant:
                 # The device does not apply output shift in wide mode
                 x = self.scale(x, out_scale)
-            x = self.clamp(self.quantize(self.activate(x)))
 
-            # This is the final scale for the output, in the device it will be realized in SW
-            x = x.mul(2.**(self.final_scale))
+            if not dev.fakeactquant:
+            #if True:
+                x = self.clamp(self.quantize(self.activate(x)))
+                # This is the final scale for the output, in the device it will be realized in SW
+                x = x.mul(2.**(self.final_scale))
+            else:
+                x = self.activate(x)
+                x = self.FakeQuantizeAct(x)
+                #x = FakeGradModifierAct.apply(x, self.FakeQuantizeAct)
         return x
 
 
@@ -902,7 +1459,7 @@ class Conv2d(QuantizationAwareModule):
             momentum=0.05,
     ):
         assert not wide or activation is None
-
+        #print(f"stride: {stride}")
         if pooling is not None:
             if pool_stride is None:
                 pool_stride = pool_size
@@ -962,13 +1519,17 @@ class Conv2d(QuantizationAwareModule):
             else:
                 assert 0 < stride <= 3
 
-        assert 0 <= padding <= 2
-
-        assert dilation == 1
+        #assert 0 <= padding <= 2
+        if padding < 0 or padding > 2:
+            print("Warning: Allowing padding < 0 or padding > 2 for ResNet tests")
+        #assert dilation == 1
+        if dilation != 1:
+            print("Warning: Allowing dilation != 1 for ResNet tests")
 
         if pooling == 'Max':
+            print("Warning: Allowing padding =! 0 for pooling")
             pool = nn.MaxPool2d(kernel_size=pool_size, stride=pool_stride,
-                                dilation=pool_dilation, padding=0)
+                                dilation=pool_dilation, padding=padding)
         elif pooling == 'Avg':
             pool = nn.AvgPool2d(kernel_size=pool_size, stride=pool_stride, padding=0)
         else:
@@ -976,7 +1537,9 @@ class Conv2d(QuantizationAwareModule):
 
         if batchnorm == 'Affine':
             bn = nn.BatchNorm2d(out_channels, eps=eps, momentum=momentum, affine=True)
-            assert bias, '`bias` must be set (enable --use-bias for models where bias is optional)'
+            #assert bias, '`bias` must be set (enable --use-bias for models where bias is optional)'
+            if not bias:
+                print("Warning: Allowing no bias batchnorm for testing")
         elif batchnorm == 'NoAffine':
             bn = nn.BatchNorm2d(out_channels, eps=eps, momentum=momentum, affine=False)
             assert bias, '`bias` must be set (enable --use-bias for models where bias is optional)'
@@ -988,9 +1551,13 @@ class Conv2d(QuantizationAwareModule):
                 assert len(kernel_size) == 2 and kernel_size[0] == kernel_size[1]
                 kernel_size = kernel_size[0]
 
-            assert kernel_size == 3 or dev.device != 84 and kernel_size == 1
+            #assert kernel_size == 3 or dev.device != 84 and kernel_size == 1
+            if kernel_size != 3 and (dev.device == 84 or kernel_size != 1):
+                print("Warning: Allowing kernel size != 3 or 1 for ResNet tests")
 
-            assert groups == 1 or dev.device == 87, 'Set device to MAX78002 for depthwise support'
+            #assert groups == 1 or dev.device == 87, 'Set device to MAX78002 for depthwise support'
+            if groups != 1 and dev.device != 87:
+                print("Warning: Allowing groups != 1 for ResNet tests")
 
             if op == 'Conv2d':
                 opn = nn.Conv2d(in_channels, out_channels,
@@ -1144,6 +1711,14 @@ class FusedConv2dReLU(Conv2d):
         super().__init__(*args, activation='ReLU', **kwargs)
 
 
+class FusedConv2dReLU6(Conv2d):
+    """
+    Fused 2D Convolution and ReLU6
+    """
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, activation='ReLU6', **kwargs)
+
+
 class FusedConv2dBN(Conv2d):
     """
     Fused 2D Convolution and BatchNorm
@@ -1157,6 +1732,16 @@ class FusedConv2dBN(Conv2d):
 class FusedConv2dBNReLU(FusedConv2dReLU):
     """
     Fused 2D Convolution and BatchNorm and ReLU
+    """
+    def __init__(self, *args, **kwargs):
+        if 'batchnorm' not in kwargs:
+            kwargs['batchnorm'] = 'Affine'
+        super().__init__(*args, **kwargs)
+
+
+class FusedConv2dBNReLU6(FusedConv2dReLU6):
+    """
+    Fused 2D Convolution and BatchNorm and ReLU6
     """
     def __init__(self, *args, **kwargs):
         if 'batchnorm' not in kwargs:
@@ -1189,6 +1774,14 @@ class FusedDepthwiseConv2dReLU(FusedConv2dReLU):
 
 
 class FusedDepthwiseConv2dBNReLU(FusedConv2dBNReLU):
+    """
+    AI8X - Fused 2D Convolution and BatchNorm and ReLU
+    """
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, groups=args[0], **kwargs)
+
+
+class FusedDepthwiseConv2dBNReLU6(FusedConv2dBNReLU6):
     """
     AI8X - Fused 2D Convolution and BatchNorm and ReLU
     """
@@ -1488,7 +2081,9 @@ class Linear(QuantizationAwareModule):
         assert not wide or activation is None
 
         assert dev.device != 84
-        assert in_features <= 1024
+        #assert in_features <= 1024
+        if in_features > 1024:
+            print(f'WARNING: in_features {in_features} > 1024')
         assert out_features <= 1024
         assert pooling is None
         assert batchnorm is None
@@ -1795,9 +2390,13 @@ class Eltwise(nn.Module):
         """
         Set Clamping Function
         """
-        if dev.simulate:
+        if dev.simulate or dev.fakeactquant:
             bits = dev.ACTIVATION_BITS
-            self.clamp = Clamp(min_val=-(2**(bits-1)), max_val=2**(bits-1)-1)
+            #self.clamp = Clamp(min_val=-(2**(bits-1)), max_val=2**(bits-1)-1)
+            self.FakeQuantizeAct =  FakeQuantizeActv2(self.activation_threshold.detach().item())
+            #FakeQuantizeAct(self.activation_threshold.detach().item(),
+                                    #           self.clamp)
+
         else:
             if clamp_activation:
                 self.clamp = Clamp(min_val=-1., max_val=127./128.)
@@ -1809,9 +2408,35 @@ class Eltwise(nn.Module):
         y = x[0]
         for i in range(1, len(x)):
             y = self.f(y, x[i])
-
-        x = self.clamp(y)
+        if dev.fakeactquant:
+            x = self.FakeQuantizeAct(y)
+            #x = FakeGradModifierAct.apply(y, self.FakeQuantizeAct)
+            #y = QuantizationFunction.apply(y, dev.ACTIVATION_BITS, self.activation_threshold)
+            #y = self.clamp(y)
+            #x = DequantizationFunction.apply(y, dev.ACTIVATION_BITS, self.activation_threshold)
+        else:
+            x = self.clamp(y)
         return x
+
+
+class ActivationQHolder(Eltwise):
+    """
+    Activation Quantization Holder
+    """
+    @staticmethod
+    def shift(x, activation_threshold):
+        """
+        Shift Activation by Activation Threshold
+        """
+        if dev.fakeactquant:
+            return x
+        #print("ActivationQHolder shift", x.min(), x.max(), activation_threshold)
+        x /= (2**activation_threshold)
+        #print("ActivationQHolder shift", x.min(), x.max())
+        return x
+
+    def __init__(self):
+        super().__init__(self.shift)
 
 
 class Add(Eltwise):
@@ -1881,10 +2506,14 @@ class Device:
     """
     Device base class
     """
-    def __init__(self, device, simulate, round_avg):
+    def __init__(self, device, simulate, round_avg, fakeactquant=False, per_channel=False, lsq_weight_scale=False):
         self.device = device
         self.simulate = simulate
         self.round_avg = round_avg
+        self.fakeactquant = fakeactquant
+        self.per_channel = per_channel
+        self.lsq_weight_scale = lsq_weight_scale
+        print(f'WARNING: lsq_weight_scale={lsq_weight_scale}')
 
     def __str__(self):
         return self.__class__.__name__
@@ -1894,10 +2523,10 @@ class DevAI84(Device):
     """
     Implementation limits for AI84
     """
-    def __init__(self, simulate, round_avg):
+    def __init__(self, simulate, round_avg, fakeactquant=False, per_channel=False, lsq_weight_scale=False):
         assert not round_avg
 
-        super().__init__(84, simulate, round_avg)
+        super().__init__(84, simulate, round_avg, fakeactquant, per_channel, lsq_weight_scale)
 
         self.WEIGHT_BITS = 8
         self.DATA_BITS = 8
@@ -1919,8 +2548,8 @@ class DevAI85(Device):
     """
     Implementation limits for MAX78000
     """
-    def __init__(self, simulate, round_avg):
-        super().__init__(85, simulate, round_avg)
+    def __init__(self, simulate, round_avg, fakeactquant=False, per_channel=False, lsq_weight_scale=False):
+        super().__init__(85, simulate, round_avg, fakeactquant, per_channel, lsq_weight_scale)
 
         self.WEIGHT_BITS = 8
         self.DATA_BITS = 8
@@ -1942,8 +2571,8 @@ class DevAI87(Device):
     """
     Implementation limits for MAX78002.
     """
-    def __init__(self, simulate, round_avg):
-        super().__init__(87, simulate, round_avg)
+    def __init__(self, simulate, round_avg, fakeactquant=False, per_channel=False, lsq_weight_scale=False):
+        super().__init__(87, simulate, round_avg, fakeactquant, per_channel, lsq_weight_scale)
 
         self.WEIGHT_BITS = 8
         self.DATA_BITS = 8
@@ -1965,6 +2594,9 @@ def set_device(
         device,
         simulate,
         round_avg,
+        fakeactquant=False,
+        per_channel=False,
+        lsq_weight_scale=False,
         verbose=True,
 ):
     """
@@ -1974,14 +2606,14 @@ def set_device(
     global dev  # pylint: disable=global-statement
 
     if verbose:
-        print(f'Configuring device: {devices.partnum(device)}, simulate={simulate}.')
+        print(f'Configuring device: {devices.partnum(device)}, simulate={simulate}, fakeactquant={fakeactquant}, per_channel={per_channel}, lsq_weight_scale={lsq_weight_scale}')
 
     if device == 84:
-        dev = DevAI84(simulate, round_avg)
+        dev = DevAI84(simulate, round_avg, fakeactquant, per_channel, lsq_weight_scale)
     elif device == 85:
-        dev = DevAI85(simulate, round_avg)
+        dev = DevAI85(simulate, round_avg, fakeactquant, per_channel, lsq_weight_scale)
     elif device == 87:
-        dev = DevAI87(simulate, round_avg)
+        dev = DevAI87(simulate, round_avg, fakeactquant, per_channel, lsq_weight_scale)
     else:
         raise ValueError(f'Unkown device {device}.')
 
@@ -2008,12 +2640,16 @@ def initiate_qat(m, qat_policy, export=False):
     for name, module in m.named_modules():
         if isinstance(module, QuantizationAwareModule) and hasattr(module, 'weight_bits'):
             if 'shift_quantile' in qat_policy:
+                print(f'Initiating {name} with {qat_policy["weight_bits"]} weight bits, '
+                      f'{qat_policy["bias_bits"]} bias bits, shift_quantile={qat_policy["shift_quantile"]}')
                 module.init_module(qat_policy['weight_bits'],
-                                   qat_policy['weight_bits'],
+                                   qat_policy['bias_bits'],
                                    True, True, qat_policy['shift_quantile'], export)
             else:
+                print(f'Initiating {name} with {qat_policy["weight_bits"]} weight bits, '
+                      f'{qat_policy["bias_bits"]} bias bits, shift_quantile=1.0')
                 module.init_module(qat_policy['weight_bits'],
-                                   qat_policy['weight_bits'], True, True, 1.0, export)
+                                   qat_policy['bias_bits'], True, True, 1.0, export)
             if 'overrides' in qat_policy:
                 if name in qat_policy['overrides']:
                     if 'weight_bits' in qat_policy['overrides'][name]:
@@ -2127,11 +2763,12 @@ def apply_scales(model):
                 "torch._C._nn.linear", "torch.conv_transpose2d"]
     nodes_to_search = []
     name_prev = None
-
+    print("Model graph: ", net_graph.graph)
     # Model graph traversal for finding the adds, concats and previous layers
     for node in net_graph.graph.nodes:
         name = node.format_node()
         if ("torch.add" in name) or ("torch.cat" in name):
+            print("Node: ", name)
             nodes_to_search.clear()
             if "target=view" in name:
                 if len(node.all_input_nodes) > 0:
@@ -2168,7 +2805,7 @@ def apply_scales(model):
                 nodes_to_search.append(input_node)
             for node_prev in reversed(net_graph.graph.nodes):
                 name_prev = node_prev.format_node()
-                if any(op_name in name_prev for op_name in op_names):
+                if any((op_name in name_prev or "operator.truediv" in name_prev) for op_name in op_names):
                     if node_prev in nodes_to_search:
                         node_prev_name = next(reversed(node_prev.__dict__['meta']
                                                        ['nn_module_stack']))
@@ -2236,9 +2873,11 @@ def apply_scales(model):
     # Get the thresholds after overrides
     thresholds = {}
     for name, module in model.named_modules():
-        if isinstance(module, QuantizationAwareModule):
+        if isinstance(module, QuantizationAwareModule) or ("input_quantizer_hold" in name and isinstance(module, Eltwise)):
             thresholds[name] = module.activation_threshold
 
+    print("Thresholds: ", thresholds)
+    print("Previous layers: ", prevs)
     # Adjust bias and threshold values according to the previous layers,
     # and set the final scale value for output layers
     for name, module in model.named_modules():
@@ -2246,8 +2885,13 @@ def apply_scales(model):
             if name in prevs:
                 prev_threshold_set = False
                 for name1, module1 in model.named_modules():
-                    if isinstance(module1, QuantizationAwareModule):
+                    if isinstance(module1, QuantizationAwareModule) or "input_quantizer_hold" in name1:
                         if name1 in prevs[name]:
+                            if name1 == "input_quantizer_hold":
+                                print("Input quantizer hold")
+                                print("Module: ", module)
+                                print("Module1: ", module1)
+                                print("Thresholds: ", thresholds[name1])
                             if not prev_threshold_set:
                                 if module.op is not None and module.op.bias is not None:
                                     module.op.bias = nn.Parameter(module.op.bias /
@@ -2271,20 +2915,28 @@ def apply_scales(model):
 def stat_collect(train_loader, model, args):
     """Collect statistics for quantization aware training"""
     model.eval()
+    #i = 0
     for inputs, _ in tqdm(train_loader):
         inputs = inputs.to(args.device)
         model(inputs)
-
+        #i += 1
+        #if i > 100:
+        #    break
 
 def pre_qat(model, train_loader, args, qat_policy):
     """
     Prepare the model for quantization aware training
     """
+
     init_hist(model)
     stat_collect(train_loader, model, args)
     init_threshold(model, qat_policy["outlier_removal_z_score"])
     release_hist(model)
-    apply_scales(model)
+    if args.fake_act_quant:
+        set_device(dev.device, dev.simulate, dev.round_avg, args.fake_act_quant, args.per_channel, args.lsq_weight_scale)
+        #print("Device configuration: ", dev)
+    else:
+        apply_scales(model)
 
 
 def init_hist(model):

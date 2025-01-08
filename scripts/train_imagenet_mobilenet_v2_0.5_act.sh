@@ -1,0 +1,2 @@
+#!/bin/sh
+python3 train.py --deterministic --epochs 200 --optimizer SGD --lr 0.05 --wd 4e-5 --momentum 0.9 --data /data_ssd  --compress policies/schedule-imagenet-mobilenet_v2_0.5.yaml --model ai8x_pt_mobilenetv2  --dataset ImageNet_224_224 --device MAX78002 --batch-size 256 --print-freq 1 --validation-split 0 --fake-act-quant --lsq-weight-scale --resume-from logs/2024.12.25-195535/checkpoint.pth.tar --use-bias --qat-policy policies/qat_policy_imagenet.yaml "$@"

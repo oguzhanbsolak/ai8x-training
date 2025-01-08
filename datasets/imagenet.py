@@ -27,7 +27,8 @@ import ai8x
 
 
 def imagenet_get_datasets(data, load_train=True, load_test=True,
-                          input_size=112, folder=False, augment_data=True):
+                          input_size=112, folder=False, augment_data=True,
+                          interpolation_mode=2):
     """
     Load the ImageNet 2012 Classification dataset.
 
@@ -41,14 +42,14 @@ def imagenet_get_datasets(data, load_train=True, load_test=True,
     from the padded image or its horizontal flip.
     """
     (data_dir, args) = data
-
     if augment_data:
         if load_train:
             train_transform = transforms.Compose([
-                transforms.RandomResizedCrop(input_size, antialias=True),
+                transforms.RandomResizedCrop(input_size, antialias=True, interpolation=interpolation_mode),
                 transforms.RandomHorizontalFlip(),
                 transforms.ToTensor(),
-                ai8x.normalize(args=args),
+                transforms.Normalize((0.485, 0.456, 0.406), (0.229, 0.224, 0.225)),
+                #ai8x.normalize(args=args),
             ])
 
             if not folder:
@@ -67,10 +68,11 @@ def imagenet_get_datasets(data, load_train=True, load_test=True,
 
         if load_test:
             test_transform = transforms.Compose([
-                transforms.Resize(int(input_size / 0.875), antialias=True),  # type: ignore
+                transforms.Resize(int(input_size / 0.875), antialias=True, interpolation=interpolation_mode),  # type: ignore
                 transforms.CenterCrop(input_size),
                 transforms.ToTensor(),
-                ai8x.normalize(args=args),
+                transforms.Normalize((0.485, 0.456, 0.406), (0.229, 0.224, 0.225)),
+                #ai8x.normalize(args=args),
             ])
 
             if not folder:
@@ -190,12 +192,42 @@ def imagenet_bayer_fold_2_get_dataset(data, load_train=True, load_test=True, fol
     return train_dataset, test_dataset
 
 
+def imagenet_get_datasets_224_224(data, load_train=True, load_test=True):
+    """
+    Load the ImageNet 2012 Classification dataset.
+    This function is used to modify the image dataset for debayerization network.
+    Obtain raw images  from RGB images.
+    """
+    return imagenet_get_datasets(data, load_train, load_test, input_size=224)
+
+
+def imagenet_get_datasets_224_224_eff(data, load_train=True, load_test=True):
+    """
+    Load the ImageNet 2012 Classification dataset.
+    This function is used to modify the image dataset for debayerization network.
+    Obtain raw images  from RGB images.
+    """
+    return imagenet_get_datasets(data, load_train, load_test, input_size=224, interpolation_mode=3)
+
+
 datasets = [
     {
         'name': 'ImageNet',
         'input': (3, 112, 112),
         'output': list(map(str, range(1000))),
         'loader': imagenet_get_datasets,
+    },
+    {
+        'name': 'ImageNet_224_224',
+        'input': (3, 224, 224),
+        'output': list(map(str, range(1000))),
+        'loader': imagenet_get_datasets_224_224,
+    },
+    {
+        'name': 'ImageNet_224_224_eff',
+        'input': (3, 224, 224),
+        'output': list(map(str, range(1000))),
+        'loader': imagenet_get_datasets_224_224_eff,
     },
     {
         'name': 'ImageNet50',

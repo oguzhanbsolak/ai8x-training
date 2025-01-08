@@ -1,0 +1,2 @@
+#!/bin/sh
+python train.py --deterministic --print-freq 200 --epochs 200 --optimizer Adam --gpus 1 --compiler-mode none --lr 0.001 --compress policies/schedule-qrcode.yaml --model ai85tinierssd_clock_connected --use-bias --momentum 0.9 --weight-decay 4e-5 --dataset Watermeter_Kaggle_clock_256_256 --device MAX78000 --obj-detection --obj-detection-params parameters/obj_detection_params_wm.yaml --batch-size 16 --qat-policy policies/qat_policy_wm.yaml --validation-split 0 "$@"

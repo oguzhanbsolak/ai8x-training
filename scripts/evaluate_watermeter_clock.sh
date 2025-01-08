@@ -1,0 +1,2 @@
+#!/bin/sh
+python train.py --deterministic --gpus 0 --compiler-mode none --model ai85tinierssd_clock_old --use-bias --dataset Watermeter_Kaggle_clock_256_256 --device MAX78000 --obj-detection --obj-detection-params parameters/obj_detection_params_wm.yaml --evaluate --device MAX78000 --exp-load-weights-from /home/oguzhanbuyuksolak/test/watermeter/ai8x-training/logs/2024.10.11-235522/qat_best.pth.tar --batch-size 16 --qat-policy policies/qat_policy_wm.yaml --validation-split 0 "$@"

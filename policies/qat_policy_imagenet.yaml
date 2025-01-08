@@ -1,3 +1,10 @@
 ---
 start_epoch: 150
-weight_bits: 8
+weight_bits: 4
+bias_bits: 8
+#shift_quantile: 0.99
+#overrides:
+#  features.0.0:
+#    weight_bits: 8
+#  classifier:
+#    weight_bits: 8

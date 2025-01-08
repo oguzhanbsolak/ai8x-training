@@ -1,0 +1,8 @@
+---
+multi_box_loss:
+  alpha: 2
+  neg_pos_ratio: 5
+nms:
+  min_score: 0.5
+  max_overlap: 0.3
+  top_k: 20

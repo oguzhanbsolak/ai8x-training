@@ -64,6 +64,15 @@ def get_parser(model_names, dataset_names):
     parser.add_argument('--avg-pool-rounding', action='store_true', default=False,
                         help='when simulating, use "round()" in AvgPool operations '
                              '(default: use "floor()")')
+    parser.add_argument('--fake-act-quant', action='store_true', default=False,
+                        help='Quantize-Clamp-Dequantize Activations'
+                             '(default: False')
+    parser.add_argument('--per-channel', action='store_true', default=False,
+                        help='Fake quantization per channel for weights'
+                             '(default: False')
+    parser.add_argument('--lsq-weight-scale', action='store_true', default=False,
+                        help='LSQ weight scale for weights'
+                             '(default: False')
     parser.add_argument('--dr', type=int, default=None,
                         help='Embedding dimensionality for dimensionality'
                              'reduction (default: None)')
