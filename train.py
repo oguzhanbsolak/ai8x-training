@@ -228,7 +228,7 @@ def main():
                               'Please raise the limit (see documentation).', nfiles)
 
     # Set hardware device
-    ai8x.set_device(args.device, args.act_mode_8bit, args.avg_pool_rounding, lsq_weight_scale=args.lsq_weight_scale)
+    ai8x.set_device(args.device, args.act_mode_8bit, args.avg_pool_rounding)
 
     if args.epochs is None:
         args.epochs = 90
@@ -619,9 +619,9 @@ def main():
             #Print optimizer "alpha" keys
 
             optimizer = ai8x.update_optimizer(model, optimizer)
-            print(f"LR was {optimizer.param_groups[0]['lr']}")
-            optimizer.param_groups[0]['lr'] = 5e-4
-            print(f"LR is now {optimizer.param_groups[0]['lr']}")
+            #print(f"LR was {optimizer.param_groups[0]['lr']}")
+            #optimizer.param_groups[0]['lr'] = 5e-4
+            #print(f"LR is now {optimizer.param_groups[0]['lr']}")
             # Update the compression scheduler to reflect the updated optimizer
             for ep, _ in enumerate(compression_scheduler.policies):
                 for pol in compression_scheduler.policies[ep]:

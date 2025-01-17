@@ -806,7 +806,7 @@ class Ceil(Function):
 
 class qSigned(Function):
     @staticmethod
-    def forward(ctx, x, log2_t, bit_width):
+    def forward(ctx, x, log2_t, bit_width, mode=False):
         r'''
         See TQT paper's Eqn. (4)
         '''
@@ -814,7 +814,13 @@ class qSigned(Function):
         n = -bit_max
         p = bit_max - 1
         s = 2.**Ceil.apply(log2_t) / bit_max
-        q = torch.clamp(RoundToEven.apply(x / s), n, p) * s
+        if not mode:
+            q = torch.clamp(RoundToEven.apply(x / s), n, p) * s
+        else:
+            s2 = 1 / bit_max
+            
+            q = torch.clamp(RoundToEven.apply(x / s), n, p) * s2
+            #TODO: Check if this is correct = Seems Correct
         ctx.save_for_backward(x / s, s, number_to_tensor(n, x),
                               number_to_tensor(p, x))
         return q
@@ -829,7 +835,7 @@ class qSigned(Function):
         grad_s = (rounded - x_div_s) * cmp0 + n * cmp1 + p * cmp2
         grad_log_2_t = math.log(2) * grad_s * s
         grad_x = cmp0 * 1.0
-        return grad_output * grad_x, grad_output * grad_log_2_t, None
+        return grad_output * grad_x, grad_output * grad_log_2_t, None, None
 
 class PoTAlpha(Function):
 
@@ -1324,12 +1330,12 @@ class QuantizationAwareModule(nn.Module):
 
         if dev.lsq_weight_scale and self.adjust_output_shift.detach() and self.op is not None:
             #self.alpha.data.copy_(2 * self.op.weight.abs().mean() / math.sqrt(2**self.weight_bits.detach().item() - 1))
-            params_r = torch.flatten(self.op.weight.detach())
+            #params_r = torch.flatten(self.op.weight.detach())
             #self.alpha.data.copy_(torch.exp2(self.calc_out_shift(params_r, self.output_shift.detach())))
-            print("Alpha was", self.alpha)
+            #print("Alpha was", self.alpha)
             self.alpha.data.copy_(calc_threshold_weight(self.op.weight, iterations=5, bits=self.weight_bits.detach().item()))
             #self.alpha.data.copy_(self.calc_out_shift(params_r, self.output_shift.detach()))
-            print("Alpha now", self.alpha)
+            #print("Alpha now", self.alpha)
             #print("op weight numel", self.op.weight.numel())
             #self.g = 1.0 / math.sqrt(self.op.weight.numel() * (2**self.weight_bits.detach().item() - 1))
     
@@ -1344,7 +1350,6 @@ class QuantizationAwareModule(nn.Module):
 
         #self.FakeQuantizeWeight = FakeQuantizeWeightv2(self.weight_bits.detach().item(), dev.per_channel)#FakeQuantizeWeight(self.clamp_weight, self.weight_bits.detach().item(), dev.per_channel)
         self.FakeQuantizeWeight = qSigned()
-
     def forward(self, x):  # pylint: disable=arguments-differ
         """Forward prop"""
         if self.pool is not None:
@@ -1386,19 +1391,22 @@ class QuantizationAwareModule(nn.Module):
                 out_shift = self.calc_out_shift(params_r, self.output_shift.detach())
                 weight_scale = self.calc_weight_scale(out_shift)
 
-            # Quantized checkpoint will have subtracted threshold from output shift
-            # Therefore, it shouldn't be done again in simulate mode
-            if not dev.simulate and not dev.fakeactquant:
-                out_shift = (out_shift - self.activation_threshold).clamp(min=-15., max=15.)
-
-                out_scale = self.calc_out_scale(out_shift)
-            if not dev.fakeactquant:
+            
+            if not dev.fakeactquant and not dev.lsq_weight_scale:
             #if True:
                 x = self._conv_forward(  # pylint: disable=protected-access
                     x,
                     self.clamp_weight(self.quantize_weight(self.op.weight.mul(weight_scale))),
                     None if self.op.bias is None
                     else self.clamp_bias(self.quantize_bias(self.op.bias.mul(weight_scale))),
+                    #self.op.bias,
+                )
+            elif not dev.fakeactquant and dev.lsq_weight_scale:
+                x = self._conv_forward(  # pylint: disable=protected-access
+                    x,
+                    self.FakeQuantizeWeight.apply(self.op.weight, self.alpha, self.weight_bits.detach().item(), not dev.fakeactquant),
+                    None if self.op.bias is None
+                    else self.FakeQuantizeWeight.apply(self.op.bias, self.alpha.detach().clone(), self.bias_bits.detach().item(), not dev.fakeactquant),
                     #self.op.bias,
                 )
             else:
@@ -1412,10 +1420,30 @@ class QuantizationAwareModule(nn.Module):
 
             if self.bn is not None:
                 x = self.bn(x)
+            # Quantized checkpoint will have subtracted threshold from output shift
+            # Therefore, it shouldn't be done again in simulate mode
+            if not dev.simulate and not dev.fakeactquant and not dev.lsq_weight_scale:
+                #print("Out Shift", out_shift)
+                #print("Activation Threshold", self.activation_threshold)
+                out_shift = (out_shift - self.activation_threshold).clamp(min=-15., max=15.)
+
+                out_scale = self.calc_out_scale(out_shift)
+            elif not dev.simulate and not dev.fakeactquant and dev.lsq_weight_scale:
+                # TODO: Check if this is correct
+                #print("alpha", self.alpha.detach().clone().ceil())
+                #print("activation threshold", self.activation_threshold)
+                #print("activation threshold", self.activation_threshold)
+                #print("self.alpha", self.alpha.detach().clone().ceil())
+                #out_shift = (self.alpha.detach().clone().ceil() - self.activation_threshold).clamp(min=-15., max=15.)
+                out_shift = (self.alpha.detach().clone().ceil()- self.activation_threshold).clamp(min=-15., max=15.)
+                #print("Out Shift", out_shift)
+                out_scale = self.calc_out_scale(out_shift)
 
             if not self.wide and not dev.fakeactquant:
                 # The device does not apply output shift in wide mode
                 x = self.scale(x, out_scale)
+                #pass
+                
 
             if not dev.fakeactquant:
             #if True:
@@ -2657,13 +2685,19 @@ def initiate_qat(m, qat_policy, export=False):
                     else:
                         weight_field = qat_policy['weight_bits']
                     if 'shift_quantile' in qat_policy['overrides'][name]:
+                        print(f'Overriding {name} with {weight_field} weight bits, '
+                            f'shift_quantile={qat_policy["overrides"][name]["shift_quantile"]}')
                         module.init_module(weight_field, weight_field, True,
                                            True, qat_policy['overrides'][name]['shift_quantile'],
                                            export)
                     elif 'shift_quantile' in qat_policy:
+                        print(f'Overriding {name} with {weight_field} weight bits, '
+                            f'shift_quantile={qat_policy["shift_quantile"]}')
                         module.init_module(weight_field, weight_field, True,
                                            True, qat_policy['shift_quantile'], export)
                     else:
+                        print(f'Overriding {name} with {weight_field} weight bits, '
+                            f'shift_quantile=1.0')
                         module.init_module(weight_field,
                                            weight_field, True, True, 1.0, export)
         elif isinstance(module, Eltwise):
@@ -2932,9 +2966,12 @@ def pre_qat(model, train_loader, args, qat_policy):
     stat_collect(train_loader, model, args)
     init_threshold(model, qat_policy["outlier_removal_z_score"])
     release_hist(model)
-    if args.fake_act_quant:
+    if args.fake_act_quant and args.lsq_weight_scale:
         set_device(dev.device, dev.simulate, dev.round_avg, args.fake_act_quant, args.per_channel, args.lsq_weight_scale)
         #print("Device configuration: ", dev)
+    elif args.fake_act_quant and not args.lsq_weight_scale:
+        set_device(dev.device, dev.simulate, dev.round_avg, args.fake_act_quant, args.per_channel, args.lsq_weight_scale)
+        apply_scales(model)
     else:
         apply_scales(model)
 
